@@ -112,3 +112,90 @@ def monitor_llamaindex_chat(
         chat_model.achat = monitored_achat
     
     return chat_model
+
+# Add newer integration for LlamaIndex V2
+def create_llamaindex_callback_handler(monitor: LLMMonitor) -> Any:
+    """
+    Create a LlamaIndex callback handler for SentinelOps monitoring.
+    
+    Args:
+        monitor: The SentinelOps monitor
+        
+    Returns:
+        A LlamaIndex callback handler
+    """
+    try:
+        from llama_index.callbacks import CallbackManager, CBEventType, BaseCallbackHandler
+        
+        class SentinelOpsCallbackHandler(BaseCallbackHandler):
+            """LlamaIndex callback handler for SentinelOps monitoring."""
+            
+            def __init__(self, monitor: LLMMonitor):
+                self.monitor = monitor
+                self.start_time = None
+                self.current_prompt = None
+                self.current_request_id = None
+                
+            def on_event_start(self, event_type: str, payload: Dict[str, Any]) -> None:
+                """Handle event start."""
+                import uuid
+                import time
+                
+                if event_type == CBEventType.LLM:
+                    self.start_time = time.time()
+                    self.current_request_id = str(uuid.uuid4())
+                    self.current_prompt = payload.get("prompt", "")
+                    
+            def on_event_end(self, event_type: str, payload: Dict[str, Any]) -> None:
+                """Handle event end."""
+                import time
+                
+                if event_type == CBEventType.LLM and self.start_time:
+                    end_time = time.time()
+                    inference_time = end_time - self.start_time
+                    
+                    # Extract completion
+                    completion = payload.get("response", "")
+                    if not isinstance(completion, str):
+                        completion = str(completion)
+                    
+                    # Record metrics
+                    prompt_tokens = self.monitor._count_tokens(self.current_prompt, self.monitor.model)
+                    completion_tokens = self.monitor._count_tokens(completion, self.monitor.model)
+                    
+                    # Prepare monitoring data
+                    monitoring_data = {
+                        "request_id": self.current_request_id,
+                        "timestamp": self.start_time,
+                        "provider": self.monitor.provider,
+                        "model": self.monitor.model,
+                        "application": self.monitor.application_name,
+                        "environment": self.monitor.environment,
+                        "inference_time": inference_time,
+                        "success": True,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                        "estimated_cost": self.monitor._calculate_cost(prompt_tokens, completion_tokens)
+                    }
+                    
+                    # Add request/response if logging is enabled
+                    if self.monitor.log_requests:
+                        monitoring_data["prompt"] = self.current_prompt
+                    
+                    if self.monitor.log_responses:
+                        monitoring_data["completion"] = completion
+                    
+                    # Publish metrics
+                    self.monitor._publish_to_kafka(monitoring_data)
+                    
+                    # Reset state
+                    self.start_time = None
+                    self.current_prompt = None
+                    self.current_request_id = None
+            
+        return SentinelOpsCallbackHandler(monitor)
+    
+    except ImportError:
+        logger.warning("LlamaIndex not installed. Install llama_index package to use this feature.")
+        return None

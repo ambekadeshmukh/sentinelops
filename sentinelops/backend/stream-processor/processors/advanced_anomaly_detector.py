@@ -8,18 +8,22 @@ import json
 import time
 from collections import defaultdict
 import uuid
+import statsmodels.api as sm
+from statsmodels.tsa.seasonal import seasonal_decompose
+from scipy.signal import find_peaks
 
 logger = logging.getLogger(__name__)
 
 class AdvancedAnomalyDetector:
     """
-    Advanced anomaly detection for LLM monitoring.
+    Enhanced anomaly detection for LLM monitoring with pattern recognition.
     
-    This class implements various anomaly detection algorithms for LLM metrics:
+    Features:
     - Statistical anomaly detection (Z-score, IQR)
-    - Time-based anomaly detection (trend analysis)
-    - Content-based anomaly detection (for hallucinations and quality issues)
-    - Error pattern detection
+    - Time-series anomaly detection with seasonal decomposition
+    - Pattern recognition for recurring issues
+    - Cost optimization insights
+    - Multi-dimensional anomaly detection
     """
     
     def __init__(
@@ -27,21 +31,24 @@ class AdvancedAnomalyDetector:
         window_size: int = 100,
         lookback_period: int = 1000,
         alert_sensitivity: float = 3.0,
-        min_data_points: int = 30
+        min_data_points: int = 30,
+        seasonal_period: int = 24  # Default: 24 hours
     ):
         """
-        Initialize the anomaly detector.
+        Initialize the enhanced anomaly detector.
         
         Args:
             window_size: Size of the window for moving statistics
             lookback_period: Number of data points to keep for historical analysis
             alert_sensitivity: Sensitivity threshold for anomaly detection (z-score)
             min_data_points: Minimum number of data points required for analysis
+            seasonal_period: Period for seasonal decomposition (in hours)
         """
         self.window_size = window_size
         self.lookback_period = lookback_period
         self.alert_sensitivity = alert_sensitivity
         self.min_data_points = min_data_points
+        self.seasonal_period = seasonal_period
         
         # State storage for different metrics by model and application
         self.metrics_data = defaultdict(lambda: defaultdict(list))
@@ -56,6 +63,12 @@ class AdvancedAnomalyDetector:
         # Time-series state
         self.last_analysis_time = datetime.now()
         self.time_bins = {}
+        
+        # Cost optimization state
+        self.cost_patterns = {}  # Track cost patterns by provider/model/application
+        
+        # Multi-dimensional analysis state
+        self.correlation_matrix = {}  # Track correlations between different metrics
     
     def add_metric(
         self, 
@@ -113,6 +126,136 @@ class AdvancedAnomalyDetector:
                 # Trim if needed
                 if len(self.token_ratios[key]) > self.lookback_period:
                     self.token_ratios[key] = self.token_ratios[key][-self.lookback_period:]
+        
+        # Update cost patterns if this is a cost metric
+        if metric_type == "estimated_cost":
+            self._update_cost_patterns(value, metadata)
+            
+        # Update correlation matrix periodically
+        if len(self.metrics_data[metric_type][key]) % 50 == 0:  # Every 50 data points
+            self._update_correlation_matrix(key)
+    
+    def _update_cost_patterns(self, cost: float, metadata: Dict[str, Any]) -> None:
+        """
+        Update cost patterns for optimization insights.
+        
+        Args:
+            cost: The cost value
+            metadata: Request metadata
+        """
+        provider = metadata.get("provider", "unknown")
+        model = metadata.get("model", "unknown")
+        application = metadata.get("application", "unknown")
+        
+        key = f"{provider}:{model}:{application}"
+        
+        # Initialize cost pattern if not exists
+        if key not in self.cost_patterns:
+            self.cost_patterns[key] = {
+                "total_cost": 0.0,
+                "request_count": 0,
+                "avg_tokens_per_request": 0,
+                "prompt_ratio": 0,  # Ratio of prompt tokens to total
+                "last_update": datetime.now(),
+                "hourly_patterns": defaultdict(float),  # Cost by hour of day
+                "daily_patterns": defaultdict(float),   # Cost by day of week
+            }
+        
+        # Update cost pattern
+        self.cost_patterns[key]["total_cost"] += cost
+        self.cost_patterns[key]["request_count"] += 1
+        
+        # Update token ratios
+        if "total_tokens" in metadata and metadata["total_tokens"] > 0:
+            total_tokens = metadata["total_tokens"]
+            prompt_tokens = metadata.get("prompt_tokens", 0)
+            
+            # Update running average of tokens per request
+            pattern = self.cost_patterns[key]
+            old_avg = pattern["avg_tokens_per_request"]
+            old_count = pattern["request_count"] - 1  # Exclude current request
+            
+            if old_count > 0:
+                new_avg = (old_avg * old_count + total_tokens) / pattern["request_count"]
+                pattern["avg_tokens_per_request"] = new_avg
+            else:
+                pattern["avg_tokens_per_request"] = total_tokens
+            
+            # Update prompt ratio
+            if total_tokens > 0:
+                old_ratio = pattern["prompt_ratio"]
+                new_ratio = prompt_tokens / total_tokens
+                
+                if old_count > 0:
+                    pattern["prompt_ratio"] = (old_ratio * old_count + new_ratio) / pattern["request_count"]
+                else:
+                    pattern["prompt_ratio"] = new_ratio
+        
+        # Update time patterns
+        timestamp = metadata.get("timestamp", datetime.now())
+        if isinstance(timestamp, (int, float)):
+            timestamp = datetime.fromtimestamp(timestamp)
+            
+        hour_key = timestamp.hour
+        day_key = timestamp.weekday()  # 0 = Monday, 6 = Sunday
+        
+        self.cost_patterns[key]["hourly_patterns"][hour_key] += cost
+        self.cost_patterns[key]["daily_patterns"][day_key] += cost
+        self.cost_patterns[key]["last_update"] = timestamp
+    
+    def _update_correlation_matrix(self, key: str) -> None:
+        """
+        Update correlation matrix between different metrics.
+        
+        Args:
+            key: The provider:model:application key
+        """
+        # Get available metric types for this key
+        metric_types = []
+        for metric_type, data_by_key in self.metrics_data.items():
+            if key in data_by_key and len(data_by_key[key]) >= self.min_data_points:
+                metric_types.append(metric_type)
+        
+        # Need at least 2 metric types for correlation
+        if len(metric_types) < 2:
+            return
+            
+        # Create data frame with aligned timestamps
+        data_points = {}
+        timestamps = set()
+        
+        # Collect all timestamps
+        for metric_type in metric_types:
+            for data_point in self.metrics_data[metric_type][key]:
+                timestamps.add(data_point["timestamp"])
+        
+        # Sort timestamps
+        sorted_timestamps = sorted(timestamps)
+        
+        # Initialize data frame
+        df = pd.DataFrame(index=sorted_timestamps)
+        
+        # Fill data frame with values
+        for metric_type in metric_types:
+            values = []
+            timestamp_to_value = {
+                data_point["timestamp"]: data_point["value"]
+                for data_point in self.metrics_data[metric_type][key]
+            }
+            
+            for ts in sorted_timestamps:
+                values.append(timestamp_to_value.get(ts, np.nan))
+            
+            df[metric_type] = values
+        
+        # Fill missing values with forward fill, then backward fill
+        df = df.fillna(method="ffill").fillna(method="bfill")
+        
+        # Compute correlation matrix
+        corr_matrix = df.corr()
+        
+        # Store correlation matrix
+        self.correlation_matrix[key] = corr_matrix.to_dict()
     
     def detect_anomalies(
         self,
@@ -129,7 +272,40 @@ class AdvancedAnomalyDetector:
         """
         anomalies = []
         
-        # Check for different types of anomalies
+        # Run basic anomaly detection
+        basic_anomalies = self._detect_basic_anomalies(current_metrics)
+        anomalies.extend(basic_anomalies)
+        
+        # Run time-series anomaly detection if we have enough data
+        if "timestamp" in current_metrics:
+            ts_anomalies = self._detect_time_series_anomalies(current_metrics)
+            anomalies.extend(ts_anomalies)
+        
+        # Run multi-dimensional anomaly detection
+        multidim_anomalies = self._detect_multidimensional_anomalies(current_metrics)
+        anomalies.extend(multidim_anomalies)
+        
+        # Check for optimization opportunities
+        if "estimated_cost" in current_metrics:
+            optimization_insights = self._check_optimization_opportunities(current_metrics)
+            anomalies.extend(optimization_insights)
+        
+        return anomalies
+    
+    def _detect_basic_anomalies(
+        self,
+        current_metrics: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Detect basic statistical anomalies in current metrics.
+        
+        Args:
+            current_metrics: The current metric values
+            
+        Returns:
+            List of detected anomalies
+        """
+        anomalies = []
         
         # 1. Inference time anomalies
         if "inference_time" in current_metrics:
@@ -172,22 +348,367 @@ class AdvancedAnomalyDetector:
             )
             anomalies.extend(memory_anomalies)
         
-        # 6. Check for hallucination indicators if we have completion text
-        if "completion" in current_metrics:
-            hallucination_anomalies = self._check_hallucination_indicators(
-                current_metrics["completion"],
-                current_metrics
+        return anomalies
+    
+    def _detect_time_series_anomalies(
+        self,
+        current_metrics: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Detect anomalies using time-series analysis.
+        
+        Args:
+            current_metrics: Current metrics with timestamp
+            
+        Returns:
+            List of detected anomalies
+        """
+        anomalies = []
+        
+        # Skip if no timestamp or required metrics
+        if "timestamp" not in current_metrics or "inference_time" not in current_metrics:
+            return anomalies
+        
+        provider = current_metrics.get("provider", "unknown")
+        model = current_metrics.get("model", "unknown")
+        application = current_metrics.get("application", "unknown")
+        
+        key = f"{provider}:{model}:{application}"
+        metric_type = "inference_time"
+        
+        # Get historical data
+        history = self.metrics_data[metric_type].get(key, [])
+        
+        # Need enough data points for time-series analysis
+        if len(history) < self.seasonal_period * 2:
+            return anomalies
+        
+        # Create time series from historical data
+        timestamps = [h["timestamp"] for h in history[-self.lookback_period:]]
+        values = [h["value"] for h in history[-self.lookback_period:]]
+        
+        # Sort by timestamp
+        time_values = sorted(zip(timestamps, values), key=lambda x: x[0])
+        timestamps = [tv[0] for tv in time_values]
+        values = [tv[1] for tv in time_values]
+        
+        try:
+            # Create pandas Series
+            ts = pd.Series(values, index=timestamps)
+            
+            # Resample to hourly data to handle irregular timestamps
+            ts = ts.resample('1H').mean().fillna(method='ffill')
+            
+            # Check if we have enough data after resampling
+            if len(ts) < self.seasonal_period * 2:
+                return anomalies
+            
+            # Perform seasonal decomposition
+            result = seasonal_decompose(
+                ts, 
+                model='additive', 
+                period=self.seasonal_period,
+                extrapolate_trend='freq'
             )
-            anomalies.extend(hallucination_anomalies)
+            
+            # Get residual component
+            residual = result.resid
+            
+            # Calculate threshold for anomalies
+            residual_std = residual.std()
+            threshold = self.alert_sensitivity * residual_std
+            
+            # Current timestamp and value
+            current_timestamp = current_metrics["timestamp"]
+            if isinstance(current_timestamp, (int, float)):
+                current_timestamp = datetime.fromtimestamp(current_timestamp)
+                
+            current_value = current_metrics["inference_time"]
+            
+            # Get expected value from trend and seasonal components
+            try:
+                # Find closest timestamp in the decomposition
+                closest_idx = (ts.index - current_timestamp).abs().argmin()
+                closest_ts = ts.index[closest_idx]
+                
+                expected_value = (
+                    result.trend[closest_ts] + 
+                    result.seasonal[closest_ts]
+                )
+                
+                # Calculate residual for current value
+                current_residual = current_value - expected_value
+                
+                # Check if residual exceeds threshold
+                if abs(current_residual) > threshold:
+                    anomaly_id = str(uuid.uuid4())
+                    anomalies.append({
+                        "type": "time_series_anomaly",
+                        "anomaly_id": anomaly_id,
+                        "value": current_value,
+                        "expected": expected_value,
+                        "residual": current_residual,
+                        "threshold": threshold,
+                        "timestamp": current_timestamp,
+                        "metadata": current_metrics
+                    })
+            except (KeyError, IndexError):
+                # If we can't find the timestamp in the decomposition, skip
+                pass
+                
+        except Exception as e:
+            logger.warning(f"Time-series anomaly detection failed: {str(e)}")
         
         return anomalies
+    
+    def _detect_multidimensional_anomalies(
+        self,
+        current_metrics: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Detect anomalies across multiple dimensions.
+        
+        Args:
+            current_metrics: Current metrics
+            
+        Returns:
+            List of detected anomalies
+        """
+        anomalies = []
+        
+        provider = current_metrics.get("provider", "unknown")
+        model = current_metrics.get("model", "unknown")
+        application = current_metrics.get("application", "unknown")
+        
+        key = f"{provider}:{model}:{application}"
+        
+        # Check if we have correlation data for this key
+        if key not in self.correlation_matrix:
+            return anomalies
+            
+        corr_matrix = self.correlation_matrix[key]
+        
+        # Example: Check if inference time and memory usage are unusually diverging
+        # when they are typically highly correlated
+        if ("inference_time" in corr_matrix and "memory_used" in corr_matrix and
+            "inference_time" in current_metrics and "memory_used" in current_metrics):
+            
+            # Get correlation coefficient
+            try:
+                corr_coef = corr_matrix["inference_time"]["memory_used"]
+                
+                # If normally highly correlated (>0.7) but current values diverge
+                if corr_coef > 0.7:
+                    # Get normalized values
+                    inference_time = current_metrics["inference_time"]
+                    memory_used = current_metrics["memory_used"]
+                    
+                    # Get historical data
+                    inference_history = self.metrics_data["inference_time"].get(key, [])
+                    memory_history = self.metrics_data["memory_used"].get(key, [])
+                    
+                    if len(inference_history) >= self.min_data_points and len(memory_history) >= self.min_data_points:
+                        # Calculate z-scores
+                        inference_mean = np.mean([h["value"] for h in inference_history[-self.window_size:]])
+                        inference_std = np.std([h["value"] for h in inference_history[-self.window_size:]])
+                        
+                        memory_mean = np.mean([h["value"] for h in memory_history[-self.window_size:]])
+                        memory_std = np.std([h["value"] for h in memory_history[-self.window_size:]])
+                        
+                        if inference_std > 0 and memory_std > 0:
+                            inference_z = (inference_time - inference_mean) / inference_std
+                            memory_z = (memory_used - memory_mean) / memory_std
+                            
+                            # Check if z-scores diverge significantly
+                            if abs(inference_z - memory_z) > self.alert_sensitivity * 1.5:
+                                anomaly_id = str(uuid.uuid4())
+                                anomalies.append({
+                                    "type": "correlation_divergence",
+                                    "anomaly_id": anomaly_id,
+                                    "metric1": "inference_time",
+                                    "metric2": "memory_used",
+                                    "value1": inference_time,
+                                    "value2": memory_used,
+                                    "z_score1": inference_z,
+                                    "z_score2": memory_z,
+                                    "correlation": corr_coef,
+                                    "metadata": current_metrics
+                                })
+            except (KeyError, TypeError):
+                pass
+        
+        return anomalies
+    
+    def _check_optimization_opportunities(
+        self,
+        current_metrics: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Check for cost optimization opportunities.
+        
+        Args:
+            current_metrics: Current metrics with cost info
+            
+        Returns:
+            List of optimization insights
+        """
+        insights = []
+        
+        if "estimated_cost" not in current_metrics:
+            return insights
+            
+        provider = current_metrics.get("provider", "unknown")
+        model = current_metrics.get("model", "unknown")
+        application = current_metrics.get("application", "unknown")
+        
+        key = f"{provider}:{model}:{application}"
+        
+        # Skip if no cost pattern data or not enough history
+        if key not in self.cost_patterns or self.cost_patterns[key]["request_count"] < self.min_data_points:
+            return insights
+        
+        pattern = self.cost_patterns[key]
+        
+        # Check for high prompt token ratio (potential for optimization)
+        if pattern["prompt_ratio"] > 0.8:  # 80% of tokens are prompt tokens
+            if "prompt_tokens" in current_metrics and "total_tokens" in current_metrics:
+                current_ratio = current_metrics["prompt_tokens"] / current_metrics["total_tokens"]
+                
+                if current_ratio > 0.8:
+                    anomaly_id = str(uuid.uuid4())
+                    insights.append({
+                        "type": "cost_optimization",
+                        "anomaly_id": anomaly_id,
+                        "subtype": "high_prompt_ratio",
+                        "value": current_ratio,
+                        "avg_ratio": pattern["prompt_ratio"],
+                        "metadata": current_metrics,
+                        "recommendation": "Consider optimizing prompts to reduce token usage."
+                    })
+        
+        # Check for models with similar capability but lower cost
+        # This would require a model capability mapping
+        model_alternatives = self._get_model_alternatives(model)
+        if model_alternatives:
+            anomaly_id = str(uuid.uuid4())
+            insights.append({
+                "type": "cost_optimization",
+                "anomaly_id": anomaly_id,
+                "subtype": "model_alternative",
+                "value": current_metrics["estimated_cost"],
+                "alternatives": model_alternatives,
+                "metadata": current_metrics,
+                "recommendation": "Consider using an alternative model with similar capabilities but lower cost."
+            })
+        
+        # Check for underutilized context window
+        if "prompt_tokens" in current_metrics and "completion_tokens" in current_metrics:
+            total_tokens = current_metrics["prompt_tokens"] + current_metrics["completion_tokens"]
+            
+            # Model-specific context windows
+            context_window = self._get_model_context_window(model)
+            
+            if context_window and total_tokens < context_window * 0.3:  # Using less than 30% of context window
+                anomaly_id = str(uuid.uuid4())
+                insights.append({
+                    "type": "cost_optimization",
+                    "anomaly_id": anomaly_id,
+                    "subtype": "underutilized_context",
+                    "value": total_tokens,
+                    "context_window": context_window,
+                    "utilization": total_tokens / context_window,
+                    "metadata": current_metrics,
+                    "recommendation": "Consider batching requests to more efficiently use the model's context window."
+                })
+        
+        return insights
+    
+    def _get_model_alternatives(self, model: str) -> List[Dict[str, Any]]:
+        """
+        Get alternative models with similar capabilities but lower cost.
+        
+        Args:
+            model: The current model
+            
+        Returns:
+            List of alternative models with cost ratio
+        """
+        # This is a simplified implementation that could be expanded with real data
+        alternatives = []
+        
+        model_lower = model.lower()
+        
+        # OpenAI alternatives
+        if "gpt-4" in model_lower:
+            alternatives.append({
+                "model": "gpt-3.5-turbo",
+                "cost_ratio": 0.1,  # ~10% of the cost
+                "capability_ratio": 0.7  # ~70% of the capability
+            })
+        elif "gpt-3.5-turbo" in model_lower:
+            alternatives.append({
+                "model": "gpt-3.5-turbo-instruct",
+                "cost_ratio": 0.8,
+                "capability_ratio": 0.9
+            })
+        
+        # Anthropic alternatives
+        elif "claude-v2" in model_lower or "claude-2" in model_lower:
+            alternatives.append({
+                "model": "claude-instant-v1",
+                "cost_ratio": 0.4,
+                "capability_ratio": 0.8
+            })
+        
+        return alternatives
+    
+    def _get_model_context_window(self, model: str) -> Optional[int]:
+        """
+        Get the context window size for a model.
+        
+        Args:
+            model: The model name
+            
+        Returns:
+            Context window size in tokens, or None if unknown
+        """
+        model_lower = model.lower()
+        
+        # OpenAI models
+        if "gpt-4-32k" in model_lower:
+            return 32768
+        elif "gpt-4" in model_lower:
+            return 8192
+        elif "gpt-3.5-turbo-16k" in model_lower:
+            return 16384
+        elif "gpt-3.5-turbo" in model_lower:
+            return 4096
+        
+        # Anthropic models
+        elif "claude-2" in model_lower or "claude-v2" in model_lower:
+            return 100000
+        elif "claude-instant" in model_lower:
+            return 100000
+        
+        # Other models could be added here
+        
+        return None
     
     def _check_inference_time_anomalies(
         self,
         inference_time: float,
         metadata: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Check for anomalies in inference time."""
+        """
+        Check for anomalies in inference time.
+        
+        Args:
+            inference_time: Current inference time
+            metadata: Request metadata
+            
+        Returns:
+            List of detected anomalies
+        """
         anomalies = []
         
         provider = metadata.get("provider", "unknown")
@@ -258,7 +779,17 @@ class AdvancedAnomalyDetector:
         completion_tokens: int,
         metadata: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Check for anomalies in token usage."""
+        """
+        Check for anomalies in token usage.
+        
+        Args:
+            prompt_tokens: Number of prompt tokens
+            completion_tokens: Number of completion tokens
+            metadata: Request metadata
+            
+        Returns:
+            List of detected anomalies
+        """
         anomalies = []
         
         provider = metadata.get("provider", "unknown")
@@ -444,170 +975,6 @@ class AdvancedAnomalyDetector:
         
         return anomalies
     
-    def _check_memory_usage_anomalies(
-        self,
-        memory_used: float,
-        metadata: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Check for anomalies in memory usage."""
-        anomalies = []
-        
-        provider = metadata.get("provider", "unknown")
-        model = metadata.get("model", "unknown")
-        application = metadata.get("application", "unknown")
-        
-        key = f"{provider}:{model}:{application}"
-        metric_type = "memory_used"
-        
-        # Get historical data
-        history = self.metrics_data[metric_type].get(key, [])
-        
-        # Need enough data for meaningful detection
-        if len(history) < self.min_data_points:
-            return anomalies
-        
-        # Get recent values
-        recent_values = [h["value"] for h in history[-self.window_size:]]
-        
-        # Calculate statistics
-        mean_memory = np.mean(recent_values)
-        std_memory = np.std(recent_values)
-        
-        # Check for unusually high memory usage
-        if std_memory > 0:  # Avoid division by zero
-            z_score = (memory_used - mean_memory) / std_memory
-            if z_score > self.alert_sensitivity:
-                anomaly_id = str(uuid.uuid4())
-                anomalies.append({
-                    "type": "high_memory_usage",
-                    "anomaly_id": anomaly_id,
-                    "value": memory_used,
-                    "mean": mean_memory,
-                    "std": std_memory,
-                    "z_score": z_score,
-                    "threshold": mean_memory + (self.alert_sensitivity * std_memory),
-                    "metadata": metadata
-                })
-        
-        return anomalies
-    
-    def _check_hallucination_indicators(
-        self,
-        completion_text: str,
-        metadata: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Check for indicators of hallucination in the completion text."""
-        anomalies = []
-        
-        # Skip if completion is too short
-        if len(completion_text) < 10:
-            return anomalies
-        
-        # Simple heuristics for hallucination detection
-        hallucination_phrases = [
-            "I don't know but",
-            "I'm not sure, but",
-            "I don't have specific information",
-            "I can't provide specific",
-            "As an AI, I don't have access to",
-            "I don't have access to real-time",
-            "I'm making this up",
-            "This is fictional",
-            "This is not based on actual",
-            "I'm speculating",
-            "I am speculating",
-            "I have to guess",
-            "I'm guessing",
-            "I am guessing"
-        ]
-        
-        uncertainty_indicators = [
-            "might be",
-            "could be",
-            "perhaps",
-            "possibly",
-            "maybe",
-            "I think",
-            "probably",
-            "likely",
-            "it seems",
-            "it appears",
-            "often",
-            "typically",
-            "generally",
-            "usually"
-        ]
-        
-        # Convert to lowercase for comparison
-        lower_text = completion_text.lower()
-        
-        # Check for hallucination phrases
-        found_phrases = []
-        for phrase in hallucination_phrases:
-            if phrase.lower() in lower_text:
-                found_phrases.append(phrase)
-        
-        # Count uncertainty indicators
-        uncertainty_count = 0
-        for indicator in uncertainty_indicators:
-            if " " + indicator.lower() + " " in " " + lower_text + " ":
-                uncertainty_count += 1
-        
-        # If we found hallucination phrases or many uncertainty indicators, report it
-        if found_phrases or uncertainty_count >= 4:
-            anomaly_id = str(uuid.uuid4())
-            anomalies.append({
-                "type": "potential_hallucination",
-                "anomaly_id": anomaly_id,
-                "hallucination_phrases": found_phrases,
-                "uncertainty_count": uncertainty_count,
-                "metadata": metadata
-            })
-        
-        # Check for contradictory statements (basic version)
-        sentences = completion_text.split(". ")
-        if len(sentences) > 5:  # Only check longer completions
-            contradictions = self._detect_contradictions(sentences)
-            if contradictions:
-                if not anomalies or anomalies[-1]["type"] != "potential_hallucination":
-                    anomaly_id = str(uuid.uuid4())
-                    anomalies.append({
-                        "type": "contradictory_statements",
-                        "anomaly_id": anomaly_id,
-                        "contradictions": contradictions[:3],  # Limit to top 3
-                        "metadata": metadata
-                    })
-        
-        return anomalies
-    
-    def _detect_contradictions(self, sentences: List[str]) -> List[Tuple[str, str]]:
-        """
-        Basic contradiction detection between sentences.
-        This is a simplified implementation and could be improved with NLP techniques.
-        """
-        contradictions = []
-        
-        # Convert to lowercase for comparison
-        sentences = [s.lower() for s in sentences]
-        
-        # Simple negation check
-        for i in range(len(sentences)):
-            for j in range(i+1, len(sentences)):
-                # Skip short sentences
-                if len(sentences[i]) < 10 or len(sentences[j]) < 10:
-                    continue
-                    
-                # Check for basic contradictions
-                if (("is" in sentences[i] and "is not" in sentences[j]) or
-                    ("is not" in sentences[i] and "is" in sentences[j]) or
-                    ("can" in sentences[i] and "cannot" in sentences[j]) or
-                    ("cannot" in sentences[i] and "can" in sentences[j]) or
-                    ("will" in sentences[i] and "will not" in sentences[j]) or
-                    ("will not" in sentences[i] and "will" in sentences[j])):
-                    contradictions.append((sentences[i], sentences[j]))
-        
-        return contradictions
-    
     def perform_periodic_analysis(self) -> List[Dict[str, Any]]:
         """
         Perform periodic analysis on collected data to detect longer-term anomalies.
@@ -626,75 +993,200 @@ class AdvancedAnomalyDetector:
         # Update last analysis time
         self.last_analysis_time = current_time
         
-        # Check for patterns across applications
+        # Perform trend analysis
+        trend_anomalies = self._detect_trend_anomalies()
+        anomalies.extend(trend_anomalies)
         
-        # Look for systemic performance issues by provider/model
-        inference_time_by_provider_model = defaultdict(list)
+        # Perform cost pattern analysis
+        cost_insights = self._analyze_cost_patterns()
+        anomalies.extend(cost_insights)
         
+        # Look for patterns across applications
+        cross_app_anomalies = self._detect_cross_application_anomalies()
+        anomalies.extend(cross_app_anomalies)
+        
+        return anomalies
+    
+    def _detect_trend_anomalies(self) -> List[Dict[str, Any]]:
+        """
+        Detect anomalies in trends over time.
+        
+        Returns:
+            List of trend anomalies
+        """
+        anomalies = []
+        
+        # Look at inference time trends
+        for key, history in self.metrics_data["inference_time"].items():
+            if len(history) < self.min_data_points * 2:  # Need more data for trend analysis
+                continue
+                
+            # Get provider, model and application from key
+            provider, model, application = key.split(":")
+            
+            # Sort history by timestamp
+            sorted_history = sorted(history, key=lambda x: x["timestamp"])
+            
+            # Split into two periods - early and recent
+            split_point = len(sorted_history) // 2
+            early_period = sorted_history[:split_point]
+            recent_period = sorted_history[split_point:]
+            
+            # Calculate means for both periods
+            early_mean = np.mean([h["value"] for h in early_period])
+            recent_mean = np.mean([h["value"] for h in recent_period])
+            
+            # Calculate standard deviation for early period
+            early_std = np.std([h["value"] for h in early_period])
+            
+            # Check if recent mean has significantly increased
+            if early_std > 0 and recent_mean > early_mean:
+                z_score = (recent_mean - early_mean) / early_std
+                
+                if z_score > self.alert_sensitivity:
+                    anomaly_id = str(uuid.uuid4())
+                    anomalies.append({
+                        "type": "inference_time_trend",
+                        "anomaly_id": anomaly_id,
+                        "provider": provider,
+                        "model": model,
+                        "application": application,
+                        "early_mean": early_mean,
+                        "recent_mean": recent_mean,
+                        "percent_increase": (recent_mean - early_mean) / early_mean * 100,
+                        "z_score": z_score,
+                        "timestamp": datetime.now()
+                    })
+        
+        return anomalies
+    
+    def _analyze_cost_patterns(self) -> List[Dict[str, Any]]:
+        """
+        Analyze cost patterns for optimization insights.
+        
+        Returns:
+            List of cost optimization insights
+        """
+        insights = []
+        
+        for key, pattern in self.cost_patterns.items():
+            # Skip if not enough data
+            if pattern["request_count"] < self.min_data_points:
+                continue
+                
+            provider, model, application = key.split(":")
+            
+            # Check for time-based usage patterns that could be optimized
+            hourly_patterns = pattern["hourly_patterns"]
+            if hourly_patterns:
+                # Find peak usage hours
+                total_cost = sum(hourly_patterns.values())
+                if total_cost > 0:
+                    peak_hours = []
+                    peak_cost = 0
+                    
+                    for hour, cost in hourly_patterns.items():
+                        if cost > total_cost * 0.15:  # Hours that account for >15% of cost
+                            peak_hours.append(hour)
+                            peak_cost += cost
+                    
+                    # If more than 50% of cost is in peak hours
+                    if peak_cost > total_cost * 0.5 and len(peak_hours) <= 6:
+                        anomaly_id = str(uuid.uuid4())
+                        insights.append({
+                            "type": "cost_optimization",
+                            "anomaly_id": anomaly_id,
+                            "subtype": "peak_hour_usage",
+                            "provider": provider,
+                            "model": model,
+                            "application": application,
+                            "peak_hours": peak_hours,
+                            "peak_cost_percentage": peak_cost / total_cost * 100,
+                            "timestamp": datetime.now(),
+                            "recommendation": "Consider optimizing workloads to avoid peak hours."
+                        })
+            
+            # Check for inefficient model usage (high ratio of prompt tokens)
+            if pattern["prompt_ratio"] > 0.75:  # More than 75% of tokens are prompt
+                anomaly_id = str(uuid.uuid4())
+                insights.append({
+                    "type": "cost_optimization",
+                    "anomaly_id": anomaly_id,
+                    "subtype": "high_prompt_ratio",
+                    "provider": provider,
+                    "model": model,
+                    "application": application,
+                    "prompt_ratio": pattern["prompt_ratio"],
+                    "timestamp": datetime.now(),
+                    "recommendation": "High prompt-to-completion ratio detected. Consider caching results, optimizing prompts, or using a different model."
+                })
+        
+        return insights
+    
+    def _detect_cross_application_anomalies(self) -> List[Dict[str, Any]]:
+        """
+        Detect anomalies that span multiple applications.
+        
+        Returns:
+            List of cross-application anomalies
+        """
+        anomalies = []
+        
+        # Group metrics by provider and model
+        provider_model_metrics = defaultdict(lambda: defaultdict(list))
+        
+        # Collect recent inference times by provider/model
         for key, history in self.metrics_data["inference_time"].items():
             if len(history) < self.min_data_points:
                 continue
                 
-            # Get provider and model from key
-            provider, model, _ = key.split(":")
+            provider, model, application = key.split(":")
             provider_model_key = f"{provider}:{model}"
             
-            # Get recent values
+            # Get average inference time for last window
             recent_values = [h["value"] for h in history[-self.window_size:]]
             avg_time = np.mean(recent_values)
             
-            inference_time_by_provider_model[provider_model_key].append(avg_time)
+            provider_model_metrics[provider_model_key]["inference_time"].append({
+                "application": application,
+                "avg_time": avg_time
+            })
         
-        # Check for models that are consistently slower
-        for provider_model, times in inference_time_by_provider_model.items():
-            if len(times) >= 3:  # Have data from at least 3 applications
-                avg_time = np.mean(times)
-                provider, model = provider_model.split(":")
+        # Check for outlier applications for each provider/model
+        for provider_model, metrics in provider_model_metrics.items():
+            if "inference_time" in metrics and len(metrics["inference_time"]) >= 3:
+                inference_times = metrics["inference_time"]
                 
-                # Check if this model is significantly slower than a threshold
-                # This threshold could be dynamically determined based on all models
-                if avg_time > 2.0:  # Example threshold
-                    anomaly_id = str(uuid.uuid4())
-                    anomalies.append({
-                        "type": "model_performance_issue",
-                        "anomaly_id": anomaly_id,
-                        "provider": provider,
-                        "model": model,
-                        "avg_inference_time": avg_time,
-                        "timestamp": current_time
-                    })
-        
-        # Check for applications with increasing error rates
-        for key, history in self.metrics_data["inference_time"].items():
-            if len(history) < 100:  # Need more data for this analysis
-                continue
+                # Calculate overall stats
+                all_times = [app["avg_time"] for app in inference_times]
+                mean_time = np.mean(all_times)
+                std_time = np.std(all_times)
                 
-            # Get application info
-            provider, model, application = key.split(":")
-            
-            # Count recent errors vs older errors
-            recent_history = history[-50:]  # Last 50 requests
-            older_history = history[-100:-50]  # Previous 50 requests
-            
-            recent_errors = sum(1 for h in recent_history if not h["metadata"].get("success", True))
-            older_errors = sum(1 for h in older_history if not h["metadata"].get("success", True))
-            
-            # Calculate error rates
-            recent_error_rate = recent_errors / len(recent_history) if recent_history else 0
-            older_error_rate = older_errors / len(older_history) if older_history else 0
-            
-            # Check for significant increase in error rate
-            if recent_error_rate > 0.1 and recent_error_rate > (2 * older_error_rate + 0.05):
-                anomaly_id = str(uuid.uuid4())
-                anomalies.append({
-                    "type": "increasing_error_rate",
-                    "anomaly_id": anomaly_id,
-                    "provider": provider,
-                    "model": model,
-                    "application": application,
-                    "recent_error_rate": recent_error_rate,
-                    "previous_error_rate": older_error_rate,
-                    "timestamp": current_time
-                })
+                if std_time > 0:
+                    # Find outliers
+                    outliers = []
+                    for app in inference_times:
+                        z_score = (app["avg_time"] - mean_time) / std_time
+                        if z_score > self.alert_sensitivity:
+                            outliers.append({
+                                "application": app["application"],
+                                "avg_time": app["avg_time"],
+                                "z_score": z_score
+                            })
+                    
+                    if outliers:
+                        provider, model = provider_model.split(":")
+                        anomaly_id = str(uuid.uuid4())
+                        anomalies.append({
+                            "type": "cross_application_outlier",
+                            "anomaly_id": anomaly_id,
+                            "provider": provider,
+                            "model": model,
+                            "metric": "inference_time",
+                            "mean": mean_time,
+                            "std": std_time,
+                            "outliers": outliers,
+                            "timestamp": datetime.now()
+                        })
         
         return anomalies

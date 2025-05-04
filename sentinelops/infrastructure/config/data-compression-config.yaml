@@ -1,0 +1,99 @@
+
+# Sample deployment configuration for optimizing resource usage with data compression
+# File: infrastructure/config/data-compression-config.yaml
+
+# OpenTelemetry Collector Configuration with Compression
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1000
+  
+  # Add resource information like service name
+  resource:
+    attributes:
+      - key: service.name
+        value: "llm-monitoring"
+        action: upsert
+  
+  # Compress data to reduce storage requirements
+  attributes:
+    actions:
+      - key: prompt.text
+        action: hash_value
+        pattern: ^.{1000,}$
+      - key: completion.text
+        action: hash_value
+        pattern: ^.{1000,}$
+
+  # Filter out unnecessary fields to reduce storage
+  filter:
+    metrics:
+      include:
+        match_type: regexp
+        metric_names:
+          - llm\..*
+          - .*\.llm\..*
+
+exporters:
+  # Export metrics to Prometheus
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: llm_monitoring
+    send_timestamps: true
+    metric_expiration: 180m
+    resource_to_telemetry_conversion:
+      enabled: true
+  
+  # Export to Kafka with compression
+  kafka:
+    brokers: ["kafka:29092"]
+    protocol_version: 2.0.0
+    topic: otel-metrics
+    encoding: otlp_proto
+    compression: gzip
+    metadata:
+      full: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 120s
+  
+  # Export directly to PostgreSQL for reporting
+  otlphttp:
+    endpoint: "http://api-server:8000/v1/metrics"
+    headers:
+      Content-Type: "application/json"
+    timeout: 30s
+    compression: gzip
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, resource, attributes]
+      exporters: [kafka, otlphttp]
+    
+    metrics:
+      receivers: [otlp]
+      processors: [batch, resource, filter, attributes]
+      exporters: [prometheus, kafka, otlphttp]
+    
+    logs:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [kafka, otlphttp]
+  
+  telemetry:
+    logs:
+      level: info
+
+# End of data-compression-config.yaml

@@ -1,0 +1,183 @@
+# GitHub Actions workflow for CI/CD pipeline
+# File: .github/workflows/ci-cd.yml
+
+name: SentinelOps CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      components:
+        description: 'Components to deploy (comma-separated)'
+        required: false
+        default: 'all'
+
+jobs:
+  # Test and build SDK
+  build-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        working-directory: ./sdk
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: Run tests
+        working-directory: ./sdk
+        run: |
+          pytest tests/
+      - name: Build SDK package
+        working-directory: ./sdk
+        run: |
+          pip install build
+          python -m build
+      - name: Upload SDK artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: sentinelops-sdk
+          path: ./sdk/dist/
+
+  # Test and build backend services
+  build-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/api-server/requirements.txt
+          pip install -r backend/stream-processor/requirements.txt
+          pip install pytest pytest-cov
+      - name: Run tests
+        run: |
+          pytest backend/
+      - name: Build Docker images
+        run: |
+          docker build -t sentinelops/api-server:${{ github.sha }} backend/api-server/
+          docker build -t sentinelops/stream-processor:${{ github.sha }} backend/stream-processor/
+      - name: Push to container registry
+        if: github.event_name != 'pull_request'
+        run: |
+          echo ${{ secrets.DOCKER_PASSWORD }} | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
+          docker push sentinelops/api-server:${{ github.sha }}
+          docker push sentinelops/stream-processor:${{ github.sha }}
+          # Tag with branch name for easier reference
+          docker tag sentinelops/api-server:${{ github.sha }} sentinelops/api-server:${{ github.ref_name }}
+          docker tag sentinelops/stream-processor:${{ github.sha }} sentinelops/stream-processor:${{ github.ref_name }}
+          docker push sentinelops/api-server:${{ github.ref_name }}
+          docker push sentinelops/stream-processor:${{ github.ref_name }}
+
+  # Build frontend
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+      - name: Run tests
+        working-directory: ./frontend
+        run: npm test
+      - name: Build frontend
+        working-directory: ./frontend
+        run: npm run build
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: sentinelops-frontend
+          path: ./frontend/build/
+
+  # Deploy to environment
+  deploy:
+    needs: [build-sdk, build-backend, build-frontend]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Kubectl
+        uses: azure/setup-kubectl@v3
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+      - name: Configure Kubernetes context
+        uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+      - name: Get deployment environment
+        id: env
+        run: |
+          if [ "${{ github.event.inputs.environment }}" != "" ]; then
+            echo "DEPLOY_ENV=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            echo "DEPLOY_ENV=production" >> $GITHUB_ENV
+          else
+            echo "DEPLOY_ENV=staging" >> $GITHUB_ENV
+          fi
+      - name: Deploy with Helm
+        run: |
+          COMPONENTS="${{ github.event.inputs.components || 'all' }}"
+          ENV_VALUES="./infrastructure/helm/values-${{ env.DEPLOY_ENV }}.yaml"
+          
+          # Set image tags for deployment
+          yq -i '.global.imageTag = "${{ github.sha }}"' $ENV_VALUES
+          
+          # Deploy components based on selection
+          if [ "$COMPONENTS" == "all" ]; then
+            helm upgrade --install sentinelops ./infrastructure/helm/sentinelops \
+              --namespace sentinelops-${{ env.DEPLOY_ENV }} \
+              --create-namespace \
+              -f $ENV_VALUES
+          else
+            # Convert comma-separated list to array
+            IFS=',' read -ra COMPONENT_ARRAY <<< "$COMPONENTS"
+            VALUES_ARGS=""
+            
+            # Set enabled=true only for selected components
+            for component in "${COMPONENT_ARRAY[@]}"; do
+              VALUES_ARGS="$VALUES_ARGS --set $component.enabled=true"
+            done
+            
+            helm upgrade --install sentinelops ./infrastructure/helm/sentinelops \
+              --namespace sentinelops-${{ env.DEPLOY_ENV }} \
+              --create-namespace \
+              -f $ENV_VALUES \
+              $VALUES_ARGS
+          fi
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/sentinelops-api-server -n sentinelops-${{ env.DEPLOY_ENV }} --timeout=300s
+          kubectl rollout status deployment/sentinelops-stream-processor -n sentinelops-${{ env.DEPLOY_ENV }} --timeout=300s
+          kubectl get pods -n sentinelops-${{ env.DEPLOY_ENV }}
+
+# End of CI/CD workflow file

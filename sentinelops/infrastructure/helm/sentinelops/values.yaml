@@ -1,0 +1,164 @@
+# Kubernetes Helm chart template for SentinelOps
+# File: infrastructure/helm/sentinelops/values.yaml
+
+# Default values for SentinelOps Helm chart
+global:
+  environment: development
+  imageTag: latest
+  storageClass: standard
+  dataRetention:
+    metrics: 7
+    requests: 7
+    anomalies: 14
+    hallucinations: 7
+    rawData: 1
+    aggregatedData: 30
+
+# Component configuration
+apiServer:
+  enabled: true
+  replicas: 1
+  image: sentinelops/api-server
+  tag: ${global.imageTag}
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+streamProcessor:
+  enabled: true
+  replicas: 1
+  image: sentinelops/stream-processor
+  tag: ${global.imageTag}
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+advancedAnalytics:
+  enabled: false
+  image: sentinelops/advanced-analytics
+  tag: ${global.imageTag}
+  resources:
+    requests:
+      cpu: 200m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 4Gi
+
+anomalyDetection:
+  enabled: false
+  image: sentinelops/anomaly-detection
+  tag: ${global.imageTag}
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+hallucinationDetection:
+  enabled: false
+  image: sentinelops/hallucination-detection
+  tag: ${global.imageTag}
+  resources:
+    requests:
+      cpu: 300m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+costOptimizer:
+  enabled: false
+  image: sentinelops/cost-optimizer
+  tag: ${global.imageTag}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+grafanaDashboards:
+  enabled: true
+  image: sentinelops/grafana-dashboards
+  tag: ${global.imageTag}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+# Infrastructure services
+prometheus:
+  enabled: true
+  retention: "7d"
+  resources:
+    requests:
+      cpu: 200m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+  storage:
+    size: 10Gi
+
+postgres:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  storage:
+    size: 10Gi
+  credentials:
+    username: llmmonitor
+    password: llmmonitor
+    database: llmmonitor
+
+kafka:
+  enabled: true
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+  storage:
+    size: 10Gi
+
+minio:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  storage:
+    size: 20Gi
+  credentials:
+    accessKey: minioadmin
+    secretKey: minioadmin
+
+# End of values.yaml

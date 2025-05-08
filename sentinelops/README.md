@@ -1,7 +1,7 @@
 # SentinelOps
 
 <p align="center">
-  <img src="docs/images/logo.png" alt="SentinelOps Logo" width="200"/>
+  <img src="docs/images/SentinelOps logo.png" alt="SentinelOps Logo" width="200"/>
 </p>
 
 <p align="center">
